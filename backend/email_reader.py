@@ -8,8 +8,10 @@ from generator import generate_agent_response
 from email_utils import send_email
 import pytesseract
 from PIL import Image
+from pdf2image import convert_from_path
 import base64
 from openai import OpenAI
+from id.progress_utils import DOCUMENT_SEQUENCE, load_progress, save_progress
 
 load_dotenv()
 
@@ -18,13 +20,24 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
 def ocr_attachment(file_path):
     try:
-        image = Image.open(file_path)
-        # Use both English and Hindi for OCR
-        text = pytesseract.image_to_string(image, lang="eng+hin")
-        txt_path = file_path + ".txt"
-        with open(txt_path, "w", encoding="utf-8") as f:
-            f.write(text)
-        return text, txt_path
+        if file_path.lower().endswith('.pdf'):
+            # Convert PDF pages to images
+            images = convert_from_path(file_path)
+            text = ""
+            for i, image in enumerate(images):
+                page_text = pytesseract.image_to_string(image, lang="eng+hin")
+                text += f"\n--- Page {i+1} ---\n{page_text}"
+            txt_path = file_path + ".txt"
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            return text, txt_path
+        else:
+            image = Image.open(file_path)
+            text = pytesseract.image_to_string(image, lang="eng+hin")
+            txt_path = file_path + ".txt"
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            return text, txt_path
     except Exception as e:
         print(f"OCR failed for {file_path}: {e}")
         return "", None
@@ -119,29 +132,92 @@ def format_ocr_text(ocr_text):
     formatted = "\n".join(f"- {line}" for line in lines)
     return formatted
 
+def extract_document_fields_with_openai(file_path, doc_type):
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+        file_b64 = base64.b64encode(file_bytes).decode("utf-8")
+    prompt = (
+        f"This is a {doc_type.replace('_', ' ')} document for Dubai onboarding. "
+        "Extract all relevant fields (e.g., Name, License Number, Expiry Date, etc.) in JSON format. "
+        "If a field is missing, write 'Not detected'."
+    )
+    # For images and PDFs, use image_url; for PDFs, you may want to convert to images and send the first page
+    file_ext = os.path.splitext(file_path)[1].lower()
+    if file_ext == ".pdf":
+        # Convert first page of PDF to image for Vision API
+        images = convert_from_path(file_path, first_page=1, last_page=1)
+        img = images[0]
+        from io import BytesIO
+        img_buffer = BytesIO()
+        img.save(img_buffer, format="JPEG")
+        img_b64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
+        image_url = f"data:image/jpeg;base64,{img_b64}"
+    else:
+        image_url = f"data:image/jpeg;base64,{file_b64}"
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "You are an assistant that extracts structured data from Dubai business documents."},
+            {"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_url}}
+            ]}
+        ],
+        max_tokens=500
+    )
+    return response.choices[0].message.content
+
 def process_emails():
     for mail in fetch_unread_emails():
         sender = mail["from"]
-        body = mail["body"]
+        body = mail["body"].strip().upper()
+        progress = load_progress(sender)
 
-        log_conversation(sender, "human", body)
+        # Step 1: Wait for "YES" to start onboarding
+        if progress["current_step"] == "ask_account_open":
+            if "YES" in body:
+                progress["current_step"] = DOCUMENT_SEQUENCE[0]
+                save_progress(sender, progress)
+                send_email(sender, "Please provide your Commercial License", "Reply with your Commercial License as an attachment.")
+            else:
+                send_email(sender, "Start Onboarding", "Reply 'YES' to begin your onboarding process.")
+            continue
 
-        history = fetch_conversation(sender)
-        reply = generate_agent_response(history, body)
+        # Step 2: Document collection and confirmation
+        current_step = progress["current_step"]
+        if current_step in DOCUMENT_SEQUENCE:
+            # Check for attachments
+            if mail["attachments"]:
+                # Save, OCR, extract fields, save JSON, send for confirmation
+                for filepath in mail["attachments"]:
+                    extracted_data = extract_document_fields_with_openai(filepath, doc_type=current_step)
+                    json_path = filepath + ".json"
+                    with open(json_path, "w", encoding="utf-8") as f:
+                        f.write(extracted_data)
+                    send_email(sender, f"Confirm your {current_step.replace('_', ' ').title()} Data", f"Extracted data:\n{extracted_data}\n\nReply 'CONFIRM' if correct or 'REUPLOAD' to upload again.")
+                    progress["documents"][current_step] = {"status": "pending_confirmation", "file": filepath, "data": extracted_data}
+                    save_progress(sender, progress)
+            elif "CONFIRM" in body:
+                idx = DOCUMENT_SEQUENCE.index(current_step)
+                progress["documents"][current_step]["status"] = "validated"
+                if idx + 1 < len(DOCUMENT_SEQUENCE):
+                    next_step = DOCUMENT_SEQUENCE[idx + 1]
+                    progress["current_step"] = next_step
+                    send_email(sender, f"Please provide your {next_step.replace('_', ' ').title()}", f"Reply with your {next_step.replace('_', ' ').title()} as an attachment.")
+                else:
+                    progress["current_step"] = "completed"
+                    send_email(sender, "Onboarding Complete", "Thank you! Your onboarding is complete.")
+                save_progress(sender, progress)
+            elif "REUPLOAD" in body:
+                progress["documents"][current_step] = {"status": "awaiting_upload"}
+                send_email(sender, f"Re-upload your {current_step.replace('_', ' ').title()}", f"Please re-upload your {current_step.replace('_', ' ').title()} as an attachment.")
+                save_progress(sender, progress)
+            else:
+                send_email(sender, f"Awaiting {current_step.replace('_', ' ').title()}", f"Please reply with your {current_step.replace('_', ' ').title()} as an attachment.")
+            continue
 
-        # If Aadhaar details exist, send them for confirmation
-        if mail.get("ocr_texts"):
-            for ocr_text, txt_path in mail["ocr_texts"]:
-                confirm_msg = (
-                    "We have extracted the following details from your Aadhaar card attachment:\n\n"
-                    f"{ocr_text}\n\n"
-                    "Please confirm if these details are correct."
-                )
-                send_email(sender, "Please Confirm Your Aadhaar Details", confirm_msg)
-                log_conversation(sender, "agent", confirm_msg)
-        else:
-            send_email(sender, "Re: Your Query", reply)
-            log_conversation(sender, "agent", reply)
-
-if __name__ == "__main__":
-    process_emails()
+        # Step 3: Completed
+        if progress["current_step"] == "completed":
+            send_email(sender, "Onboarding Already Complete", "Your onboarding process is already complete.")
