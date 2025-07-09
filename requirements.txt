@@ -1,0 +1,17 @@
+# FastAPI backend
+fastapi
+uvicorn
+
+# Streamlit frontend
+streamlit
+requests
+
+# Supabase integration
+supabase
+
+# For environment variables
+python-dotenv
+
+# Optional but recommended for validation and HTTP tools
+pydantic
+httpx
