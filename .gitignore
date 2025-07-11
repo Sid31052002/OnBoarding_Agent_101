@@ -40,8 +40,7 @@ htmlcov/
 .tox/
 .nox/
 .coverage
-.coverage.*
-.cache
+.coverage.*mpf
 nosetests.xml
 coverage.xml
 *.cover
@@ -88,3 +87,6 @@ Desktop.ini
 *.swp
 *.swo
 *~
+
+# Node.js dependencies (only in frontend)
+frontend/**/node_modules/

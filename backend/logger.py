@@ -1,5 +1,8 @@
-# logger.py
+import os
 import logging
+
+# Ensure the logs directory exists
+os.makedirs("F:/Freelance/Onboarding-Agent/backend/logs", exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,

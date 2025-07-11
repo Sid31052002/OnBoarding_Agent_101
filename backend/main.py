@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from backend.models import Customer
 from backend.email_utils import send_welcome_email
-from backend.crud import register_customer,fetch_latest_email
+from backend.crud import register_customer,fetch_latest_email,supabase
 from backend.conversation import log_conversation
 from backend.id.progress_utils import save_progress, load_progress
 
@@ -42,3 +42,13 @@ async def register(customer:Customer):
 def get_progress(email: str):
     progress = load_progress(email)
     return progress
+
+@app.get("/all_users_progress")
+def all_users_progress():
+    # Fetch all users from the onboarding table
+    response = supabase.table("onboarding").select("*").execute()
+    users = response.data if hasattr(response, "data") else []
+    # Attach progress for each user
+    for user in users:
+        user["progress"] = load_progress(user["email"])
+    return users
