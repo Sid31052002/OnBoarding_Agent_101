@@ -29,10 +29,10 @@ def send_email(to_mail, subject, body):
 
 
 def send_welcome_email(to_mail):
-    subject = "Welcome to Linum Labs!"
+    subject = "Welcome to Thrivv"
     body = (
         "Hi there,\n\n"
-        "Thank you for signing up with us. We're excited to have you onboard!\n\n"
-        "- Team Linum Labs"
+        "Thank you for signing up with us. We're excited to have you onboard! I am your onboarding agent and I will help you to open a savings/business account.\n\n"
+        "- Team Thrivv"
     )
     return send_email(to_mail, subject, body)
