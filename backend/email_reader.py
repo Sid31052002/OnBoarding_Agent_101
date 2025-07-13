@@ -169,6 +169,16 @@ def extract_document_fields_with_openai(file_path, doc_type):
     )
     return response.choices[0].message.content
 
+def format_key_value(data):
+    import json
+    try:
+        obj = json.loads(data) if isinstance(data, str) else data
+        if isinstance(obj, dict):
+            return "\n".join(f"{k}: {v}" for k, v in obj.items())
+        return str(data)
+    except Exception:
+        return str(data)
+
 def process_emails():
     for mail in fetch_unread_emails():
         sender = mail["from"]
@@ -181,8 +191,17 @@ def process_emails():
                 progress["current_step"] = DOCUMENT_SEQUENCE[0]
                 save_progress(sender, progress)
                 send_email(sender, "Please provide your Commercial License", "Reply with your Commercial License as an attachment.")
+            elif "NO" in body:
+                progress["current_step"] = "declined"
+                save_progress(sender, progress)
+                send_email(sender, "Onboarding Declined", "You have declined the onboarding process. If you change your mind, reply 'YES' to start again.")
             else:
-                send_email(sender, "Start Onboarding", "Reply 'YES' to begin your onboarding process.")
+                send_email(sender, "Start Onboarding", "Reply 'YES' to begin your onboarding process or 'NO' to decline.")
+            continue
+
+        # Handle declined onboarding
+        if progress["current_step"] == "declined":
+            send_email(sender, "Onboarding Declined", "You have already declined onboarding. Reply 'YES' if you want to start again.")
             continue
 
         # Step 2: Document collection and confirmation
@@ -193,10 +212,11 @@ def process_emails():
                 # Save, OCR, extract fields, save JSON, send for confirmation
                 for filepath in mail["attachments"]:
                     extracted_data = extract_document_fields_with_openai(filepath, doc_type=current_step)
+                    human_readable = format_key_value(extracted_data)
                     json_path = filepath + ".json"
                     with open(json_path, "w", encoding="utf-8") as f:
                         f.write(extracted_data)
-                    send_email(sender, f"Confirm your {current_step.replace('_', ' ').title()} Data", f"Extracted data:\n{extracted_data}\n\nReply 'CONFIRM' if correct or 'REUPLOAD' to upload again.")
+                    send_email(sender, f"Confirm your {current_step.replace('_', ' ').title()} Data", f"Extracted data:\n{human_readable}\n\nReply 'CONFIRM' if correct or 'REUPLOAD' to upload again.")
                     progress["documents"][current_step] = {"status": "pending_confirmation", "file": filepath, "data": extracted_data}
                     save_progress(sender, progress)
             elif "CONFIRM" in body:
@@ -221,3 +241,24 @@ def process_emails():
         # Step 3: Completed
         if progress["current_step"] == "completed":
             send_email(sender, "Onboarding Already Complete", "Your onboarding process is already complete.")
+        
+        # If not an onboarding command, treat as general query
+        onboarding_status = []
+        for doc in DOCUMENT_SEQUENCE:
+            doc_info = progress["documents"].get(doc, {})
+            status = doc_info.get("status", "not submitted")
+            onboarding_status.append(f"{doc.replace('_', ' ').title()}: {status}")
+        onboarding_summary = "\n".join(onboarding_status)
+        context = (
+            f"User onboarding progress:\n{onboarding_summary}\n"
+            f"Current step: {progress.get('current_step')}\n"
+        )
+
+        # Fetch conversation history if needed
+        history = fetch_conversation(sender)
+        # Combine onboarding context with user query
+        full_query = f"{context}\nUser query: {body}"
+        agent_reply = generate_agent_response(history, full_query)
+        log_conversation(sender, "human", body)
+        log_conversation(sender, "agent", agent_reply)
+        send_email(sender, "Re: Your Query", agent_reply)
